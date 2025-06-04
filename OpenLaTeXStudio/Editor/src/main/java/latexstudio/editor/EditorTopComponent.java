@@ -5,20 +5,24 @@
  */
 package latexstudio.editor;
 
-import com.dropbox.core.DbxAccountInfo;
-import com.dropbox.core.DbxClient;
 import com.dropbox.core.DbxException;
+import com.dropbox.core.v2.DbxClientV2;
+import java.awt.Color;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import javax.swing.JOptionPane;
 import javax.swing.text.BadLocationException;
+import javax.swing.text.DefaultHighlighter;
+import javax.swing.text.Highlighter;
 import latexstudio.editor.files.FileService;
 import latexstudio.editor.remote.Cloud;
-import latexstudio.editor.remote.DbxState;
 import latexstudio.editor.remote.DbxUtil;
 import latexstudio.editor.settings.ApplicationSettings;
 import latexstudio.editor.settings.SettingListener;
@@ -28,6 +32,11 @@ import org.fife.ui.autocomplete.AutoCompletion;
 import org.fife.ui.autocomplete.BasicCompletion;
 import org.fife.ui.autocomplete.CompletionProvider;
 import org.fife.ui.autocomplete.DefaultCompletionProvider;
+import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
+import org.languagetool.JLanguageTool;
+import org.languagetool.language.AmericanEnglish;
+import org.languagetool.rules.Rule;
+import org.languagetool.rules.spelling.SpellingCheckRule;
 import org.netbeans.api.settings.ConvertAsProperties;
 import org.openide.awt.ActionID;
 import org.openide.awt.ActionReference;
@@ -61,14 +70,13 @@ import org.openide.windows.TopComponent;
 })
 public final class EditorTopComponent extends TopComponent {
 
-    private boolean dirty = false;
-    private boolean modified = false;
-    private boolean previewDisplayed = true;
-    private File currentFile;
-    private DbxState dbxState;
-
+    private final EditorState editorState = new EditorState();
     private AutoCompletion autoCompletion = null;
     private static final ApplicationLogger LOGGER = new ApplicationLogger("Cloud Support");
+    private JLanguageTool langTool = null;
+    private Highlighter.HighlightPainter painter = null;
+    private boolean spellCheckStatusChange = true;
+    private Thread autoCheckThread = null;
 
     public EditorTopComponent() {
         initComponents();
@@ -79,6 +87,7 @@ public final class EditorTopComponent extends TopComponent {
         putClientProperty(TopComponent.PROP_UNDOCKING_DISABLED, Boolean.TRUE);
 
         displayCloudStatus();
+        setupSpellCheckTool();
     }
 
     @SettingListener(setting = ApplicationSettings.Setting.AUTOCOMPLETE_ENABLED)
@@ -117,6 +126,7 @@ public final class EditorTopComponent extends TopComponent {
         rSyntaxTextArea.setRows(5);
         rSyntaxTextArea.setSyntaxEditingStyle(org.openide.util.NbBundle.getMessage(EditorTopComponent.class, "EditorTopComponent.rSyntaxTextArea.syntaxEditingStyle")); // NOI18N
         rSyntaxTextArea.addKeyListener(new java.awt.event.KeyAdapter() {
+            @Override
             public void keyReleased(java.awt.event.KeyEvent evt) {
                 rSyntaxTextAreaKeyReleased(evt);
             }
@@ -148,15 +158,15 @@ public final class EditorTopComponent extends TopComponent {
     }// </editor-fold>                        
 
     private void rSyntaxTextAreaKeyReleased(java.awt.event.KeyEvent evt) {
-        dirty = true;
-        setModified(true);
+        editorState.setDirty(true);
+        editorState.setModified(true);
     }
 
     private void rSyntaxTextAreaKeyTyped(java.awt.event.KeyEvent evt) {
-        if (currentFile == null || evt.isControlDown()) {
+        if (editorState.getCurrentFile() == null || evt.isControlDown()) {
             return;
         }
-        setDisplayName(currentFile.getName() + '*');
+        setDisplayName(editorState.getCurrentFile().getName() + '*');
     }
 
     // Variables declaration - do not modify//GEN-BEGIN:variables
@@ -203,31 +213,47 @@ public final class EditorTopComponent extends TopComponent {
 
     public void setEditorContent(String text) {
         rSyntaxTextArea.setText(text);
-        dirty = true;
+        editorState.setDirty(true);
     }
 
-    public boolean isDirty() {
-        return dirty;
+    public Thread getAutoCheckThread() {
+        return autoCheckThread;
     }
 
-    public void setDirty(boolean dirty) {
-        this.dirty = dirty;
+    public void setAutoCheckThread(Thread autoCheckThread) {
+        this.autoCheckThread = autoCheckThread;
+    }  
+    
+    public RSyntaxTextArea getrSyntaxTextArea() {
+        return rSyntaxTextArea;
     }
 
-    public boolean isModified() {
-        return modified;
+    public void setrSyntaxTextArea(RSyntaxTextArea rSyntaxTextArea) {
+        this.rSyntaxTextArea = rSyntaxTextArea;
     }
 
-    public void setModified(boolean modified) {
-        this.modified = modified;
+    public JLanguageTool getLangTool() {
+        return langTool;
     }
 
-    public boolean isPreviewDisplayed() {
-        return previewDisplayed;
+    public void setLangTool(JLanguageTool langTool) {
+        this.langTool = langTool;
     }
 
-    public void setPreviewDisplayed(boolean previewDisplayed) {
-        this.previewDisplayed = previewDisplayed;
+    public Highlighter.HighlightPainter getPainter() {
+        return painter;
+    }
+
+    public void setPainter(Highlighter.HighlightPainter painter) {
+        this.painter = painter;
+    }
+
+    public boolean isSpellCheckStatusChange() {
+        return spellCheckStatusChange;
+    }
+
+    public void setSpellCheckStatusChange(boolean spellCheckStatusChange) {
+        this.spellCheckStatusChange = spellCheckStatusChange;
     }
 
     public void undoAction() {
@@ -238,26 +264,14 @@ public final class EditorTopComponent extends TopComponent {
         rSyntaxTextArea.redoLastAction();
     }
 
-    public File getCurrentFile() {
-        return currentFile;
-    }
-
     public void setCurrentFile(File currentFile) {
-        this.currentFile = currentFile;
+        editorState.setCurrentFile(currentFile);
 
         if (currentFile != null) {
             setDisplayName(currentFile.getName());
             ApplicationSettings.Setting.USER_LASTFILE.setValue(currentFile.getAbsolutePath());
             ApplicationSettings.INSTANCE.save();
         }
-    }
-
-    public DbxState getDbxState() {
-        return dbxState;
-    }
-
-    public void setDbxState(DbxState dbxState) {
-        this.dbxState = dbxState;
     }
 
     private String findStartSymbol() {
@@ -361,39 +375,62 @@ public final class EditorTopComponent extends TopComponent {
     }
 
     private void displayCloudStatus() {
-
-        boolean isConnected = false;
-        String message;
-        DbxAccountInfo info = null;
+        String message = "Working locally.";
+        String displayName;
 
         // Check Dropbox connection
-        DbxClient client = DbxUtil.getDbxClient();
-        if (client != null) {
-            String userToken = client.getAccessToken();
-            if (userToken != null && !userToken.isEmpty()) {
-                try {
-                    info = client.getAccountInfo();
-                    isConnected = true;
-                } catch (DbxException ex) {
-                    // simply stay working locally.
-                }
+        DbxClientV2 client = DbxUtil.getDbxClient();
+        if (client != null) {  
+            try {
+                displayName = client.users().getCurrentAccount().getName().getDisplayName();
+                message = "Connected to Dropbox account as " + displayName + ".";
+                Cloud.getInstance().setStatus(Cloud.Status.DBX_CONNECTED, " (" + displayName + ")");
+            } catch (DbxException ex) {
+                // simply stay working locally.
+                Cloud.getInstance().setStatus(Cloud.Status.DISCONNECTED);
             }
         }
-
-        if (isConnected) {
-            message = "Connected to Dropbox account as " + info.displayName + ".";
-            Cloud.getInstance().setStatus(Cloud.Status.DBX_CONNECTED, " (" + info.displayName + ")");
-        } else {
-            message = "Working locally.";
-            Cloud.getInstance().setStatus(Cloud.Status.DISCONNECTED);
-        }
-
+        
         LOGGER.log(message);
+    }
+    
+    private void setupSpellCheckTool() {     
+        painter = new DefaultHighlighter.DefaultHighlightPainter(Color.PINK);  //Default color is: PINK
+        langTool = new JLanguageTool(new AmericanEnglish());    //Default Language is: American English
+        for (Rule rule : langTool.getAllActiveRules()) {
+            if (rule instanceof SpellingCheckRule) {
+                ((SpellingCheckRule)rule).acceptPhrases(getLatexTerms());  //Accept LaText Terms from tex.cwl
+                ((SpellingCheckRule)rule).acceptPhrases(Arrays.asList("documentclass", "maketitle", "tex", "TEX", "Tex"));  //Accept some TEX terms not contained in tex.cwl
+            }
+        }
+    }
+    
+    private List<String> getLatexTerms() {
+        List latexTerms = new ArrayList<>();
+        InputStream is = null;
+        URL latexTermsResource;
+        try {
+            latexTermsResource = getClass().getResource("/openlatexstudio/tex.cwl");
+            is = latexTermsResource.openStream();
+            BufferedReader br = new BufferedReader(new InputStreamReader(is));
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (!line.startsWith("#")) {
+                    latexTerms.add(line.substring(1));  //LanguageTool cannot recognize string starts with "\"
+                }
+            }
+        } catch (IOException ex) {
+            Exceptions.printStackTrace(ex);
+        } finally {
+            IOUtils.closeQuietly(is);
+        }
+        
+        return latexTerms;
     }
 
     public UnsavedWorkState canOpen() {
 
-        if (isModified() && !isPreviewDisplayed()) {
+        if (editorState.isModified() && !editorState.isPreviewDisplayed()) {
             int userChoice = JOptionPane.showConfirmDialog(this, "This document has been modified. Do you want to save it first?", "Save document", JOptionPane.YES_NO_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
             if (userChoice == JOptionPane.YES_OPTION) {
                 return UnsavedWorkState.SAVE_AND_OPEN;
@@ -406,5 +443,9 @@ public final class EditorTopComponent extends TopComponent {
         } else {
             return UnsavedWorkState.OPEN;
         }
+    }
+    
+    public EditorState getEditorState() {
+        return editorState;
     }
 }

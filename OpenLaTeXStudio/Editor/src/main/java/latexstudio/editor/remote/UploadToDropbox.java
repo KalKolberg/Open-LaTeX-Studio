@@ -5,10 +5,10 @@
  */
 package latexstudio.editor.remote;
 
-import com.dropbox.core.DbxClient;
-import com.dropbox.core.DbxEntry;
 import com.dropbox.core.DbxException;
-import com.dropbox.core.DbxWriteMode;
+import com.dropbox.core.v2.DbxClientV2;
+import com.dropbox.core.v2.files.FileMetadata;
+import com.dropbox.core.v2.files.WriteMode;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.File;
@@ -27,6 +27,7 @@ import org.openide.awt.ActionRegistration;
 import org.openide.util.Exceptions;
 import org.openide.util.NbBundle.Messages;
 import static latexstudio.editor.util.ApplicationUtils.TEX_EXTENSION;
+import org.apache.commons.io.FileUtils;
 
 @ActionID(
         category = "Remote",
@@ -46,12 +47,12 @@ public final class UploadToDropbox implements ActionListener {
 
     @Override
     public void actionPerformed(ActionEvent e) {
-        DbxClient client = DbxUtil.getDbxClient();
+        DbxClientV2 client = DbxUtil.getDbxClient();
         
         if (client == null) {
             return;
         }
-
+        
         String sourceFileName = ApplicationUtils.getTempSourceFile();
         File file = new File(sourceFileName);
         
@@ -62,16 +63,19 @@ public final class UploadToDropbox implements ActionListener {
             Exceptions.printStackTrace(ex);
         }
         
-        String defaultFileName = etc.getCurrentFile() == null ? "welcome.tex" : etc.getCurrentFile().getName();
+        String defaultFileName = etc.getEditorState().getCurrentFile() == null ? "welcome.tex" : etc.getEditorState().getCurrentFile().getName();
         String fileName = (String) JOptionPane.showInputDialog(null, "Please enter file name", "Upload file", 
                 JOptionPane.INFORMATION_MESSAGE, null, null, defaultFileName);
         if (fileName != null) {
             fileName = fileName.endsWith(TEX_EXTENSION) ? fileName : fileName.concat(TEX_EXTENSION);
             try {
-                DbxEntry.File uploadedFile = client.uploadFile("/OpenLaTeXStudio/" + fileName,
-                    DbxWriteMode.add(), file.length(), inputStream);
+                FileMetadata metadata = client.files()
+                        .uploadBuilder("/OpenLaTeXStudio/" + fileName)
+                        .withMode(WriteMode.OVERWRITE)
+                        .uploadAndFinish(inputStream);
+                String humanSize = FileUtils.byteCountToDisplaySize(metadata.getSize());
                 JOptionPane.showMessageDialog(null, 
-                        "Successfuly uploaded file " + uploadedFile.name + " (" + uploadedFile.humanSize + ")",
+                        "Successfuly uploaded file " + metadata.getName() + " (" + humanSize + ")",
                         "File uploaded to Dropbox",
                         JOptionPane.INFORMATION_MESSAGE);
                 revtc.close();
